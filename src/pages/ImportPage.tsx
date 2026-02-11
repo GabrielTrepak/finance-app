@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import Dexie from "dexie";
 import { db } from "../app/db/db";
 import { useAuthStore } from "../app/stores/authStore";
@@ -16,16 +17,41 @@ type PreviewRow = {
 };
 
 type ImportKind = "inter" | "mp";
-
 type ImportResult = InterImportResult | MpImportResult;
 
+function toISOFromBR(ddmmyyyy: string): string {
+  const [dd, mm, yyyy] = ddmmyyyy.split("/");
+  return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+}
+
+function parseInterPeriodFromHeader(raw: string): { start: string; end: string } | null {
+  // exemplo real: "Período ;20/11/2025 a 20/12/2025"
+  const m = raw.match(/Período\s*;(\d{2}\/\d{2}\/\d{4})\s*a\s*(\d{2}\/\d{2}\/\d{4})/i);
+  if (!m) return null;
+  return { start: toISOFromBR(m[1]), end: toISOFromBR(m[2]) };
+}
+
+function minMaxISO(dates: string[]): { start: string; end: string } | null {
+  if (!dates.length) return null;
+  let min = dates[0];
+  let max = dates[0];
+  for (const d of dates) {
+    if (d < min) min = d;
+    if (d > max) max = d;
+  }
+  return { start: min, end: max };
+}
+
 export default function ImportPage() {
-  const key = useAuthStore((s) => s.key);
+  const nav = useNavigate();
+  const key = useAuthStore((s): CryptoKey | null => s.key);
 
   const [preview, setPreview] = useState<PreviewRow[]>([]);
   const [fileType, setFileType] = useState<ImportKind | null>(null);
   const [rawText, setRawText] = useState("");
   const [status, setStatus] = useState<string | null>(null);
+
+  const [range, setRange] = useState<{ start: string; end: string } | null>(null);
 
   async function handleFile(file: File) {
     setStatus(null);
@@ -44,9 +70,18 @@ export default function ImportPage() {
     } else {
       setFileType(null);
       setPreview([]);
+      setRange(null);
       setStatus("Formato não reconhecido. Envie um CSV do Inter ou Mercado Pago.");
       return;
     }
+
+    // aplica regras antes (pra quando você for ver no dashboard/transações já estar categorizado)
+    await applyRulesToImported(result.items, result.descriptionsByUid);
+
+    // ✅ prioridade: range declarado no cabeçalho do Inter; fallback: min/max das linhas
+    const fromHeader = text.includes("Período") ? parseInterPeriodFromHeader(text) : null;
+    const fromRows = minMaxISO(result.items.map((x) => x.date));
+    setRange(fromHeader ?? fromRows);
 
     const rows: PreviewRow[] = result.items.slice(0, 8).map((t) => ({
       uid: t.uid,
@@ -75,13 +110,9 @@ export default function ImportPage() {
     setStatus("Importando...");
 
     let result: ImportResult;
-    if (fileType === "inter") {
-      result = await importInter(rawText, "inter");
-    } else {
-      result = await importMercadoPago(rawText, "mercado_pago");
-    }
+    if (fileType === "inter") result = await importInter(rawText, "inter");
+    else result = await importMercadoPago(rawText, "mercado_pago");
 
-    // ✅ aplica regras ANTES de salvar
     await applyRulesToImported(result.items, result.descriptionsByUid);
 
     let inserted = 0;
@@ -97,7 +128,6 @@ export default function ImportPage() {
       };
 
       try {
-        // &uid é unique no schema -> se já existir, lança ConstraintError
         await db.transactions.add(row);
         inserted++;
       } catch (e) {
@@ -109,9 +139,13 @@ export default function ImportPage() {
       }
     }
 
-    setStatus(
-      `Importação concluída. Inseridos: ${inserted}. Duplicados ignorados: ${duplicated}.`
-    );
+    setStatus(`Importação concluída. Inseridos: ${inserted}. Duplicados ignorados: ${duplicated}.`);
+
+    // ✅ range final (de novo, prioriza cabeçalho do Inter)
+    const fromHeader = rawText.includes("Período") ? parseInterPeriodFromHeader(rawText) : null;
+    const fromRows = minMaxISO(result.items.map((x) => x.date));
+    const r = fromHeader ?? fromRows;
+    setRange(r);
   }
 
   return (
@@ -130,6 +164,18 @@ export default function ImportPage() {
 
       {status && <div className="mt-4 text-sm text-black/70">{status}</div>}
 
+      {range && (
+        <div className="mt-3 text-sm text-black/70">
+          Range do extrato: <b>{range.start}</b> até <b>{range.end}</b>
+          <button
+            className="ml-3 text-sm underline"
+            onClick={() => nav(`/transactions?start=${range.start}&end=${range.end}`)}
+          >
+            Ver transações desse range
+          </button>
+        </div>
+      )}
+
       {preview.length > 0 && (
         <div className="mt-6 border rounded-xl p-4 bg-white">
           <div className="font-medium mb-3">Preview</div>
@@ -139,9 +185,7 @@ export default function ImportPage() {
               <div key={p.uid} className="text-sm flex gap-3">
                 <div className="w-28 text-black/70">{p.date}</div>
                 <div className="w-28 tabular-nums">{p.amount}</div>
-                <div className="flex-1 text-black/80 truncate">
-                  {p.description}
-                </div>
+                <div className="flex-1 text-black/80 truncate">{p.description}</div>
               </div>
             ))}
           </div>

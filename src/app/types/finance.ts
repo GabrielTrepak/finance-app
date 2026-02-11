@@ -29,9 +29,11 @@ export type Transaction = {
 };
 
 export type MonthConfig = {
-  month: string;       // YYYY-MM
-  savingGoal: number;  // ex: 1000
+  month: string;              // YYYY-MM
+  savingGoal: number;         // meta de economia
+  budgets?: Record<string, number>; // limites por categoria (expense)
 };
+
 
 export type Rule = {
   id: string;           // uuid/string
